@@ -1,0 +1,16 @@
+global:
+  scrape_interval:     30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  # Make Prometheus scrape itself for metrics.
+  - job_name: 'prometheus'
+    static_configs:
+    - targets: ['localhost:9090']
+
+  - job_name: 'cadvisor'
+    dns_sd_configs:
+      - names:
+          - cadvisor
+        type: A
+        port: 8080
