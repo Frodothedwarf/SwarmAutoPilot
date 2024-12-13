@@ -9,17 +9,12 @@ repos:
       - id: requirements-txt-fixer
       - id: name-tests-test
       - id: trailing-whitespace
-  
+
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
     hooks:
       - id: isort
-  
-  - repo: https://github.com/pycqa/flake8
-    rev: 7.1.1
-    hooks:
-      - id: flake8
-  
+
   - repo: https://github.com/psf/black
     rev: 24.10.0
     hooks:

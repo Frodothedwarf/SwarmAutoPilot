@@ -55,7 +55,7 @@ services:
       "--cpu_scale_down_threshold=0.85", # Scale down threshold, determined in percent (1 is 100%, 0 is 0%)
       "--cpu_scale_up_threshold=0.5", # Scale up threshold, determined in percent (1 is 100%, 0 is 0%)
       "--reserved_cpu_cores=0", # Reserved CPU cores
-      "--api_key=", # Hetzner API key 
+      "--api_key=", # Hetzner API key
       "--node_networks=10432518", # Server networks
       "--node_firewalls=1782060", # Server firewall
       "--node_image=ubuntu-22.04", # Server image
