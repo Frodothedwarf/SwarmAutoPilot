@@ -1,4 +1,5 @@
 import importlib
+from datetime import date, datetime
 
 class ProviderFactory:
     @staticmethod
@@ -15,30 +16,28 @@ class ProviderFactory:
                 return attr(parser_args=parser_args)  # Instantiate and return the provider
 
         raise ValueError(f"No valid provider class found in module '{module_name}'.")
-    
-class ProviderBase:
+
+class Node:
+    id: int
+    name: str
+    labels: dict
+    created_at: datetime
+
     def __init__(self):
         pass
 
-    def get_nodes(self):
-        """
-        New providers shall return the following:
-        [{
-        "created_at": <datetime>,
-        "id": <id>,
-        "name": <name>,
-        "labels": {"key": <key>, "label": <label>}
-        }]
-
-        And only return nodes created by the autopilot.
-        """
+    def delete(self):
         raise NotImplementedError("A node scale provider must implement this method.")
     
-    def node_create(self):
+    def update_labels(self):
         raise NotImplementedError("A node scale provider must implement this method.")
 
-    def node_delete(self):
+class ProviderBase:
+    def __init__(self):
+        raise NotImplementedError("A node scale provider must implement this method.")
+
+    def get_nodes(self) -> list[Node]:
         raise NotImplementedError("A node scale provider must implement this method.")
     
-    def node_update_labels(self):
+    def node_create(self) -> Node:
         raise NotImplementedError("A node scale provider must implement this method.")

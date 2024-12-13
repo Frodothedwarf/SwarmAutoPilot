@@ -1,8 +1,9 @@
 import logging
+from platform import node
 import requests
 from datetime import datetime, timedelta, timezone
 import time
-from providers import ProviderBase
+from providers import ProviderBase, Node
 from handlers.docker import DockerHandler, DockerService
 from handlers.prometheus import PrometheusHandler
 import traceback
@@ -112,38 +113,13 @@ class Pilot:
                 
 
             if self.node_scaling_enabled:
-                swarm_nodes = self.node_scale_provider.get_nodes()
+                nodes = self.node_scale_provider.get_nodes()
 
-                self.check_node_cpu_resources(free_cpu_resources=free_cpu_resources, total_cpu_cores=total_cpu_cores, swarm_nodes=swarm_nodes)
+                self.check_node_cpu_resources(free_cpu_resources=free_cpu_resources, total_cpu_cores=total_cpu_cores, nodes=nodes)
 
-                if swarm_nodes:
-                    logging.debug("Checking if new nodes has joined the swarm.")
-                    for swarm_node in swarm_nodes:
-                        id = swarm_node["id"]
-                        name = swarm_node["name"]
-                        labels = swarm_node["labels"]
-                        status = labels["Status"]
-                        created_at = swarm_node["created_at"]
-
-                        if status == "Creating":
-                            now = datetime.now().replace(tzinfo=timezone.utc)
-                            one_hour_ago = now - timedelta(hours=1)
-
-                            logging.info("Checking if node: %s, has joined the cluster.", name)
-                            try:
-                                confirm_node = self.docker_handler.get_node_info(name)
-                            except:
-                                logging.error("Didn't find node in swarm: %s", name)
-                                confirm_node = None
-
-                            if confirm_node:
-                                labels["Status"] = "Running"
-                                self.node_scale_provider.node_update_labels(id, labels)
-                                logging.info("Found node: %s, updated label Status to Running.", name)
-                            elif created_at < one_hour_ago:
-                                logging.error("Waited for node: %s for one hour, and it didn't show up in swarm. Removing node.", name)
-                                self.node_scale_provider.node_delete(id)
-                                logging.info("Node: %s is set to remove on provider.", name)
+                if nodes:
+                    self.check_new_joined_nodes(nodes=nodes)
+                    
             time.sleep(60)
 
     def check_docker_cpu_resources(self, docker_service: DockerService, service_cpu_usage: float) -> DockerService:
@@ -174,49 +150,84 @@ class Pilot:
             logging.info("No scale is needed for service: %s.", docker_service.name)
         return docker_service
 
-    def check_node_cpu_resources(self, free_cpu_resources: float, total_cpu_cores: float, swarm_nodes: list):
-        if ((free_cpu_resources / total_cpu_cores) < self.cpu_scale_up_threshold) or (len(swarm_nodes) < self.node_scale_min_scale):
+    def check_node_cpu_resources(self, free_cpu_resources: float, total_cpu_cores: float, nodes: list[Node]):
+        if ((free_cpu_resources / total_cpu_cores) < self.cpu_scale_up_threshold) or (len(nodes) < self.node_scale_min_scale):
+            if len(nodes) < self.node_scale_min_scale:
+                logging.info("Swarm is under minimum scale, adding nodes.")
+                nodes_to_create = self.node_scale_min_scale - len(nodes)
+                for _ in range(nodes_to_create):
+                    self.node_scale_provider.node_create()
+                logging.info("%s nodes is being created.", nodes_to_create)
+                return
+            
             logging.info("Swarm is too low on CPU resources, adding new node.")
             self.node_scale_provider.node_create()
             logging.info("New node is being created.")
-        elif ((free_cpu_resources / total_cpu_cores) > self.cpu_scale_down_threshold or len(swarm_nodes) > self.node_scale_max_scale) and swarm_nodes:
+        elif ((free_cpu_resources / total_cpu_cores) > self.cpu_scale_down_threshold or len(nodes) > self.node_scale_max_scale) and nodes:
             logging.info("Swarm has too many free CPU resources, looking for node to remove.")
             now = datetime.now().replace(tzinfo=timezone.utc)
             fifteen_minutes_ago = now - timedelta(minutes=15)
 
-            for swarm_node in swarm_nodes:
-                created_at = swarm_node["created_at"]
-                id = swarm_node["id"]
-                name = swarm_node["name"]
-                labels = swarm_node["labels"]
-                status = labels["Status"]
+            for node in nodes:
+                labels = node.labels
+                if node.created_at > fifteen_minutes_ago:
+                    continue
 
-                if created_at < fifteen_minutes_ago:
-                    logging.info("Found node: %s, trying to remove it.", name)
-                    docker_node = self.docker_handler.get_node_info(name)
+                logging.info("Found node: %s, trying to remove it.", node.name)
+                docker_node = self.docker_handler.get_node_info(node.name)
 
-                    if status == "Running":
-                        logging.info("Drain of node: %s, needed.", name)
-                        drain_response = docker_node.drain()
-                        if drain_response is not None:
-                            logging.info("Drain of node: %s, has begun.", name)
-                            labels["Status"] = "Draining"
-                            self.node_scale_provider.node_update_labels(id, labels)
-                            logging.debug("Updated label Status to Draining on node: %s.", name)
-                        else:
-                            logging.error("Drain of node: %s, has encountered an error: %s.", name, drain_response)
-                    elif status == "Draining":
-                        logging.info("Confirming drain has completed on node: %s.", name)
-                        confirm_drain_response = docker_node.confirm_drain()
-                        if confirm_drain_response is True:
-                            logging.info("Deleting node: %s, from swarm.", name)
-                            delete_response = docker_node.remove(docker_node.id)
-                            if delete_response is True:
-                                logging.info("Deleting node from provider: %s", name)
-                                self.node_scale_provider.node_delete(id)
-                                logging.info("Node: %s is set to remove on provider.", name)
-                            else:
-                                logging.error("Deletion of swarm node: %s, encountered an error.", name)
-                        else:
-                            logging.info("Drain of node: %s, hasn't completed, waiting.", name)
-                    break
+                if labels["Status"] == "Running":
+                    logging.info("Drain of node: %s, needed.", node.name)
+                    drain_response = docker_node.drain()
+                    if drain_response is False:
+                        logging.error("Drain of node: %s, has encountered an error.", node.name)
+                        break
+
+                    logging.info("Drain of node: %s, has begun.", node.name)
+                    labels["Status"] = "Draining"
+                    node.update_labels(labels)
+                    logging.debug("Updated label Status to Draining on node: %s.", node.name)
+                elif labels["Status"] == "Draining":
+                    logging.info("Confirming drain has completed on node: %s.", node.name)
+                    confirm_drain_response = docker_node.confirm_drain()
+                    if confirm_drain_response is False:
+                        logging.info("Drain of node: %s, hasn't completed, waiting.", node.name)
+                        break
+
+                    logging.info("Deleting node: %s, from swarm.", node.name)
+                    delete_response = docker_node.remove(docker_node.id)
+                    if delete_response is False:
+                        logging.error("Deletion of swarm node: %s, encountered an error.", node.name)
+                        break
+
+                    logging.info("Deleting node from provider: %s", node.name)
+                    node.delete()
+                    logging.info("Node: %s is set to remove on provider.", node.name)
+                break
+    
+    def check_new_joined_nodes(self, nodes):
+        logging.debug("Checking if new nodes has joined the swarm.")
+        for node in nodes:
+            labels = node["labels"]
+
+            if labels["Status"] != "Creating":
+                continue
+
+            now = datetime.now().replace(tzinfo=timezone.utc)
+            one_hour_ago = now - timedelta(hours=1)
+
+            logging.info("Checking if node: %s, has joined the cluster.", node.name)
+            try:
+                confirm_node = self.docker_handler.get_node_info(node.name)
+            except:
+                logging.error("Didn't find node in swarm: %s", node.name)
+                confirm_node = None
+
+            if confirm_node:
+                labels["Status"] = "Running"
+                self.node_scale_provider.node_update_labels(id, labels)
+                logging.info("Found node: %s, updated label Status to Running.", node.name)
+            elif node.created_at < one_hour_ago:
+                logging.error("Waited for node: %s for one hour, and it didn't show up in swarm. Removing node.", node.name)
+                self.node_scale_provider.node_delete(id)
+                logging.info("Node: %s is set to remove on provider.", node.name)

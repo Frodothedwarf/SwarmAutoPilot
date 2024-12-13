@@ -5,9 +5,46 @@ import random
 import string
 import base64
 
-from providers import ProviderBase
+from providers import ProviderBase, Node
 from main import main_parser
 import logging
+
+hetzner_base_url = "https://api.hetzner.cloud/v1"
+
+def get_hetzner_headers(self, api_key: str):
+    return {"Authorization": f"Bearer {api_key}"}
+
+class HetznerNode(Node):
+    def __init__(self, hetzner_json_object: dict, api_key: str):
+        self.__create_object(hetzner_json_object=hetzner_json_object)
+        self.__set_headers(api_key=api_key)
+    
+    def __create_object(self, hetzner_json_object: dict, api_key: str) -> None:
+        server_object = hetzner_json_object["server"] if "server" in hetzner_json_object.keys() else hetzner_json_object
+        self.id = server_object["id"]
+        self.name = server_object["name"]
+        self.labels = server_object["labels"]
+        self.created_at = datetime.fromisoformat(server_object["created"])
+    
+    def __set_headers(self, api_key: str) -> None:
+        self.headers = get_hetzner_headers(api_key=api_key)
+
+    def delete(self) -> bool:
+        response = requests.delete(f"{hetzner_base_url}/servers/{self.id}", headers=self.headers)
+        if response.status_code != 200:
+            logging.error(f"Hetzner Provider: delete_node request returned {response.status_code}, error: {response.text}")
+            return False
+        return True
+    
+    def update_labels(self, labels: dict) -> list[dict]:
+        payload = {
+            "labels":labels
+        }
+        response = requests.put(f"{hetzner_base_url}/servers/{self.id}", headers=self.headers, json=payload)
+        if response.status_code != 200:
+            logging.error(f"Hetzner Provider: node_update_labels request returned {response.status_code}, error: {response.text}")
+            return False
+        return response.json()["server"]["labels"]
 
 class HetznerProvider(ProviderBase):
     def __str__(self):
@@ -15,8 +52,6 @@ class HetznerProvider(ProviderBase):
 
     def __init__(self, parser_args):
         super(HetznerProvider, self).__init__()
-
-        self.base_url = "https://api.hetzner.cloud/v1"
 
         hetzner_parser = argparse.ArgumentParser(parents = [main_parser], add_help=False)
         hetzner_parser.add_argument("--api_key", help="Sets the API key to be used with Hetzner cloud", dest="api_key", type=str)
@@ -35,7 +70,6 @@ class HetznerProvider(ProviderBase):
         if not hetzner_args.api_key:
             raise ValueError("API Key must be set when using Hetzner as a provider.")
         
-        self.api_key = hetzner_args.api_key
         self.node_prefix = hetzner_args.node_prefix
         self.node_label = hetzner_args.node_label
 
@@ -60,8 +94,11 @@ class HetznerProvider(ProviderBase):
         self.node_location = hetzner_args.node_location
         
         self.node_ssh_keys = hetzner_args.node_ssh_keys.split(",")
-    def _get_headers(self):
-        return {"Authorization": f"Bearer {self.api_key}"}
+
+        self.__set_headers(api_key=hetzner_args.api_key)
+
+    def __set_headers(self, api_key: str) -> None:
+        self.headers = get_hetzner_headers(api_key=api_key)
 
     def get_nodes(self):
         pages_found = True
@@ -69,7 +106,7 @@ class HetznerProvider(ProviderBase):
         nodes = []
 
         while pages_found:
-            response = requests.get(f"{self.base_url}/servers?page={current_page}&per_page=50&label_selector=Type={self.node_label}", headers=self._get_headers())
+            response = requests.get(f"{hetzner_base_url}/servers?page={current_page}&per_page=50&label_selector=Type={self.node_label}", headers=self.headers)
             if response.status_code != 200:
                 raise Exception(f"Hetzner Provider: get_nodes request returned {response.status_code}, error: {response.text}")
             
@@ -80,16 +117,8 @@ class HetznerProvider(ProviderBase):
             if current_page == pagination["last_page"]:
                 pages_found = False
         
-        nodes_prepared = []
-        for node in nodes:
-            nodes_prepared.append({
-                "created_at": datetime.fromisoformat(node["created"]),
-                "id": node["id"],
-                "name": node["name"],
-                "labels": node["labels"]
-                })
-        
-        return nodes_prepared
+        hetzner_nodes = [HetznerNode(hetzner_json_object=node) for node in nodes]
+        return hetzner_nodes
 
     def node_create(self):
         payload = {
@@ -104,26 +133,9 @@ class HetznerProvider(ProviderBase):
             "user_data": self.node_user_data,
         }
 
-        response = requests.post(f"{self.base_url}/servers", headers=self._get_headers(), json=payload)
+        response = requests.post(f"{hetzner_base_url}/servers", headers=self.headers, json=payload)
         if response.status_code != 201:
             raise Exception(f"Hetzner Provider: create_node request returned {response.status_code}, error: {response.text}")
-
-        return True
-
-    def node_delete(self, node_id):
-        response = requests.delete(f"{self.base_url}/servers/{node_id}", headers=self._get_headers())
-        if response.status_code != 200:
-            raise Exception(f"Hetzner Provider: delete_node request returned {response.status_code}, error: {response.text}")
-        
-        return True
-    
-    def node_update_labels(self, node_id, labels):
-        payload = {
-            "labels":labels
-        }
-        response = requests.put(f"{self.base_url}/servers/{node_id}", headers=self._get_headers(), json=payload)
-
-        if response.status_code != 200:
-            raise Exception(f"Hetzner Provider: node_update_labels request returned {response.status_code}, error: {response.text}")
-        
-        return response.json()
+        response_json = response.json()
+        hetzner_node = HetznerNode(hetzner_json_object=response_json)
+        return hetzner_node
